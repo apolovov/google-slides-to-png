@@ -1,0 +1,7 @@
+PyYAML
+google-api-core==1.22.2
+google-api-python-client==1.12.3
+google-auth==1.22.0
+google-auth-httplib2==0.0.4
+google-auth-oauthlib==0.4.1
+googleapis-common-protos==1.52.0
