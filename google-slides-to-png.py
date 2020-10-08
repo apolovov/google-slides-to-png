@@ -9,19 +9,14 @@ import yaml
 import urllib3
 import re
 import uuid
+import argparse
+
 import sys
 
 from hashlib import sha256
 
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/presentations', 'https://www.googleapis.com/auth/drive']
-
-# The ID of a sample presentation.
-PRESENTATION_ID = '1cn9nYznVeAw1yFbsSDzFGRtiO9CBgse9NiCmABo6Wpg'
-#PRESENTATION_ID = '1Ne6MxfLcc2-Of4LrHtblB_vyphXPcj1cLWVve8RUMhI'
-
-LOCAL_DIR = '/Users/a.polovov/work/flant/dev/slider/local/'
-
 STEP = 10000
 
 class SuperSlide:
@@ -55,7 +50,7 @@ class SuperSlide:
         layout_id = self.getLayoutId()
         layout_data = [x for x in self.slider.presentation['layouts'] if x['objectId'] == layout_id][0]
         display_name = layout_data['layoutProperties']['displayName']
-        m = re.match(r"^Dima – .+ – (\S+)$", display_name)
+        m = re.match(r"^.+ – .+ – (\S+)$", display_name)
         if m:
             return m.group(1).lower()
         else:
@@ -65,13 +60,6 @@ class SuperSlide:
         content = yaml.dump(self.data)
         content = re.sub(r'contentUrl:.*', '', content)
         return sha256(content.strip().encode('utf-8')).hexdigest()
-
-    # def updateSlideData(self):
-    #     self.data = [x for x in self.slider.presentation['slides'] if x['objectId'] == self.data['objectId']][0]
-    #     self.hash = self._calculateHash()
-
-    # def setNumber(self, number):
-    #     self.number = number
 
     def getNumber(self):
         return self.number
@@ -91,17 +79,23 @@ class SuperSlide:
     def getSpecialLabel(self):
         return self.specialLabel
 
-    # def downloadThumbnail(self):
-    #     resp = self.slider.service.presentations().pages().getThumbnail(presentationId=PRESENTATION_ID,pageObjectId=self.data['objectId']).execute()
-    #     self.thumbnailUrl = resp['contentUrl']
+    def renderPNGName(self):
+        name = "{:010d}".format(self.getNumber())
+        if self.specialLabel:
+            name = name + "_" + self.specialLabel
+        name = name + ".png"
+        return name
 
     def downloadPNG(self, dst):
         url = 'https://docs.google.com/presentation/d/' + self.slider.presentationId + '/export/png?id=' + self.slider.presentationId + '&pageid=' + self.pageId
         headers = {'Authorization': 'Bearer ' + self.slider.creds.token}
         http = urllib3.PoolManager()
         r = http.request(method='GET',url=url,headers=headers)
-        with open(dst, "wb") as f:
-            f.write(r.data)
+        if r.status == 200:
+            with open(dst, "wb") as f:
+                f.write(r.data)
+        else:
+            print("Can't download " + dst + ", API HTTP response code is " + str(r.status))
 
     # recursion
     def enumerate(self, start_point, iteration):
@@ -113,6 +107,30 @@ class SuperSlide:
         else:
             self.number = start_point + STEP * (iteration + 1)
         return self.number
+
+    def setTransporentBackgroundAsync(self):
+        self.requestsList.append(
+            {
+                'updatePageProperties': {
+                    'objectId': self.pageId,
+                    'fields': "pageBackgroundFill",
+                    'pageProperties': {
+                        'pageBackgroundFill': {
+                            'solidFill': {
+                                'color': {
+                                    'rgbColor': {
+                                        'red': 0.0,
+                                        'green': 0.0,
+                                        'blue': 0.0
+                                    }
+                                },
+                                'alpha': 0.0
+                            }
+                        }
+                    }
+                }
+            }
+        )
 
     def uploadNumberAsync(self):
         if self.isNoteHadContent:
@@ -140,7 +158,7 @@ class SuperSlide:
 
 
 class Slider:
-    def __init__(self, presentation_id, store_path = None):
+    def __init__(self, presentation_id, store_path = None, credentials_path = None):
         self.presentationId = presentation_id
         self.creds = None
         # The file token.pickle stores the user's access and refresh tokens, and is
@@ -155,7 +173,7 @@ class Slider:
                 self.creds.refresh(Request())
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES)
+                    credentials_path, SCOPES)
                 self.creds = flow.run_local_server(port=0)
             # Save the credentials for the next run
             with open('token.pickle', 'wb') as token:
@@ -204,6 +222,10 @@ class Slider:
         for super_slide in self.superSlides:
             super_slide.uploadNumberAsync()
 
+    def setTransporentBackgrounds(self):
+        for super_slide in self.superSlides:
+            super_slide.setTransporentBackgroundAsync()
+
     def wipeLayouts(self):
         layout_ids = []
         for super_slide in self.superSlides:
@@ -227,11 +249,6 @@ class Slider:
                 }
             )
 
-    # def updateSuperSlides(self):
-    #     self.presentation = self.service.presentations().get(presentationId=self.presentationId).execute()
-    #     for super_slide in self.superSlides:
-    #         super_slide.updateSlideData()
-
     def updateStatus(self):
         self.status = {}
         for super_slide in self.superSlides:
@@ -247,11 +264,14 @@ class Slider:
             if super_slide.pageId in self.status and self.status[super_slide.pageId]['hash'] == super_slide.hash:
                 continue
 
-            png_path = self.storePathNew + '/' + "{:010d}".format(super_slide.getNumber())
-            special_label = super_slide.getSpecialLabel()
-            if special_label:
-                png_path = png_path + "_" + special_label
-            png_path = png_path + '.png'
+            png_path_new = self.storePathNew + '/' + super_slide.renderPNGName()
+            png_path_current = self.storePathCurrent + '/' + super_slide.renderPNGName()
+            png_path = ""
+
+            if os.path.exists(png_path_current):
+                png_path = png_path_current
+            else:
+                png_path = png_path_new
 
             print("  " + png_path)
             super_slide.downloadPNG(png_path)
@@ -288,9 +308,16 @@ class Slider:
         self.driveService.files().delete(fileId=self.presentationId).execute()
 
 def main():
-    sliderOriginal = Slider(PRESENTATION_ID)
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--presentation-id", type=str, action='store', help="Google Presentation ID to download")
+    argparser.add_argument("--store-dir", type=str, action='store', help="Dir to store rendered slides (<dir>/new, <dir>/current) and status file (<dir>/status.yaml)")
+    argparser.add_argument("--credentials", type=str, action='store', help="path to credentials.json")
 
-    print("Initing original presentation: " + PRESENTATION_ID)
+    args = argparser.parse_args()
+
+    sliderOriginal = Slider(presentation_id=args.presentation_id, credentials_path=args.credentials)
+
+    print("Initing original presentation: " + args.presentation_id)
     sliderOriginal.initSuperSlides()
     print("Enumerating slides...")
     sliderOriginal.enumerateSlides()
@@ -301,11 +328,12 @@ def main():
     print("Creating temporary presentation...")
     tmp_presentation_id = sliderOriginal.copyPresentation()
     print("  " + tmp_presentation_id)
-    sliderTmp = Slider(presentation_id=tmp_presentation_id, store_path=LOCAL_DIR)
+    sliderTmp = Slider(presentation_id=tmp_presentation_id, store_path=args.store_dir, credentials_path=args.credentials)
     print("Initing temporary presentation...")
     sliderTmp.initSuperSlides()
-    print("Wiping Dima's face from temporary presentation...")
+    print("Wiping Dima's face from temporary presentation and setting transporent background...")
     sliderTmp.wipeLayouts()
+    sliderTmp.setTransporentBackgrounds()
     sliderTmp.batchUpdateAllRequests()
     print("Downloading fresh PNGs...")
     sliderTmp.downloadFreshPNGs()
@@ -317,14 +345,6 @@ def main():
     sliderTmp.deleteStalePNGs()
     print("Saving status registry...")
     sliderTmp.saveStatus()
-
-
-
-
-
-    #print(yaml.dump(slider.presentation['slides']))
-    #slider.superSlides[3].downloadPNG()
-
 
 if __name__ == '__main__':
     main()
